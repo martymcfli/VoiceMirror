@@ -201,6 +201,154 @@ async function startServer() {
     }
   });
 
+  // --- Claude AI Proxy ---
+  // All AI calls go through the server so the API key stays server-side
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+  async function callClaude(messages: any[], system?: string, maxTokens = 1024): Promise<string> {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: maxTokens,
+        system: system || undefined,
+        messages,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("[Claude] API error:", response.status, err);
+      throw new Error(`Claude API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.content?.[0]?.text || "";
+  }
+
+  // Conversation response - the AI interviewer
+  app.post("/api/v1/ai/conversation", async (req, res) => {
+    try {
+      const { history, currentGoal, voiceScore } = req.body;
+
+      const systemPrompt = `You are the VoiceMirror Interviewer. Your goal is to capture the user's unique "Voice DNA".
+
+CURRENT INTERVIEW GOAL: ${currentGoal}
+
+USER'S CURRENT VOICE SCORE:
+- Coverage: ${Math.round((voiceScore?.coverage || 0) * 100)}%
+- Variability: ${Math.round((voiceScore?.variability || 0) * 100)}%
+- Consistency: ${Math.round((voiceScore?.consistency || 0) * 100)}%
+- Depth: ${Math.round((voiceScore?.depth || 0) * 100)}%
+- Adaptability: ${Math.round((voiceScore?.adaptability || 0) * 100)}%
+
+GUIDELINES:
+1. Be conversational, warm, and slightly inquisitive.
+2. Don't just ask the goal directly; weave it into the conversation.
+3. If the user's "Depth" is low, ask for more details or stories.
+4. If "Variability" is low, try to provoke a more emotional or humorous response.
+5. Keep your responses short (1-2 sentences) to keep the focus on the user speaking.
+6. Your primary job is to get the user to TALK as much as possible in their natural style.`;
+
+      const messages = (history || []).map((h: any) => ({
+        role: h.role === 'model' ? 'assistant' : 'user',
+        content: h.text,
+      }));
+
+      const text = await callClaude(messages, systemPrompt, 256);
+      res.json({ text });
+    } catch (e: any) {
+      console.error("[AI] Conversation error:", e);
+      res.status(500).json({ error: e.message || "AI conversation failed" });
+    }
+  });
+
+  // Analyze transcripts
+  app.post("/api/v1/ai/analyze", async (req, res) => {
+    try {
+      const { transcripts } = req.body;
+      const fullText = (transcripts || []).map((t: any) => t.text).join(" ");
+
+      const text = await callClaude([{
+        role: "user",
+        content: `Analyze the following transcript for communication style features. Return ONLY a JSON object (no markdown, no code blocks) matching this exact schema:
+{
+  "linguistic": { "avg_sentence_length": number, "vocab_uniqueness": number (0-1), "filler_words": string[] },
+  "prosodic": { "speech_rate_wpm": number, "avg_pause_ms": number },
+  "behavioral": { "assertiveness": number (0-1), "formality": number (0-1) }
+}
+
+Transcript:
+${fullText}`
+      }], "You are a linguistics analysis engine. Return only valid JSON, no markdown formatting.", 512);
+
+      const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      res.json(JSON.parse(cleaned));
+    } catch (e: any) {
+      console.error("[AI] Analysis error:", e);
+      res.status(500).json({ error: e.message || "Analysis failed" });
+    }
+  });
+
+  // Generate voice profile
+  app.post("/api/v1/ai/generate-profile", async (req, res) => {
+    try {
+      const { analysis } = req.body;
+
+      const text = await callClaude([{
+        role: "user",
+        content: `Based on the following communication analysis, generate a structured Voice Profile. Return ONLY a JSON object (no markdown, no code blocks) matching this schema:
+{
+  "baseline_voice": { "tone": string, "sentence_style": string, "cadence": { "pause_frequency": string, "speech_rate": string }, "personality_prompt": string },
+  "emotional_voice": { "tone": string, "personality_prompt": string },
+  "casual_voice": { "tone": string, "personality_prompt": string },
+  "compressed_voice": { "tone": string, "personality_prompt": string },
+  "patterns": string[], "anti_patterns": string[], "signature_patterns": string[], "fillers": string[],
+  "tone": string, "sentence_style": string,
+  "cadence": { "pause_frequency": string, "speech_rate": string },
+  "personality_prompt": string
+}
+
+Analysis:
+${JSON.stringify(analysis, null, 2)}`
+      }], "You are a voice profiling engine. Return only valid JSON, no markdown formatting.", 2048);
+
+      const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      res.json(JSON.parse(cleaned));
+    } catch (e: any) {
+      console.error("[AI] Profile generation error:", e);
+      res.status(500).json({ error: e.message || "Profile generation failed" });
+    }
+  });
+
+  // Rewrite text in user's voice
+  app.post("/api/v1/ai/rewrite", async (req, res) => {
+    try {
+      const { profile, inputText } = req.body;
+
+      const text = await callClaude([{
+        role: "user",
+        content: `Rewrite the following text in the specified voice style. Return only the rewritten text, nothing else.
+
+Voice Profile:
+${JSON.stringify(profile, null, 2)}
+
+Text to rewrite:
+${inputText}`
+      }], profile?.baseline_voice?.personality_prompt || "Rewrite in the user's voice style.", 1024);
+
+      res.json({ text });
+    } catch (e: any) {
+      console.error("[AI] Rewrite error:", e);
+      res.status(500).json({ error: e.message || "Rewrite failed" });
+    }
+  });
+
   // --- Vite middleware for development ---
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
