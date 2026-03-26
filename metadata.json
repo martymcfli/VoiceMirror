@@ -1,0 +1,7 @@
+{
+  "name": "VoiceMirror",
+  "description": "Learn and mirror your unique communication style for AI interactions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

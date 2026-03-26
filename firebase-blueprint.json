@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the VoiceMirror application.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "createdAt"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "A voice capture session.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "mode": { "type": "string", "enum": ["guided", "freeform"] },
+        "profileTarget": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "ended", "processing", "completed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "mode", "status", "createdAt"]
+    },
+    "Transcript": {
+      "title": "Transcript",
+      "description": "A chunk of transcribed text from a session.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "text": { "type": "string" },
+        "startTime": { "type": "number" },
+        "endTime": { "type": "number" },
+        "confidence": { "type": "number" }
+      },
+      "required": ["sessionId", "text", "startTime", "endTime"]
+    },
+    "VoiceProfile": {
+      "title": "VoiceProfile",
+      "description": "A generated voice identity layer.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "profileJson": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "profileJson", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data."
+    },
+    "/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Voice capture sessions."
+    },
+    "/sessions/{sessionId}/transcripts/{transcriptId}": {
+      "schema": "Transcript",
+      "description": "Transcripts for a specific session."
+    },
+    "/profiles/{profileId}": {
+      "schema": "VoiceProfile",
+      "description": "Stored voice profiles."
+    }
+  }
+}
