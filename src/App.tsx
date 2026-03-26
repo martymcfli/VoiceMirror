@@ -478,8 +478,26 @@ export default function App() {
         setCurrentCategory(nextPrompt.category);
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Conversation failed', error);
+      // Show error as AI message so user knows what happened
+      const errorMsg = error?.message?.includes('API key') || error?.message?.includes('403') || error?.message?.includes('leaked')
+        ? "I can't respond right now because the AI API key needs to be refreshed. Your speech is still being captured! Hit 'End & Analyze' when you're done and the analysis will work once the key is updated."
+        : "Something went wrong with the AI response. Your speech is still being recorded though!";
+
+      const errorTranscript = {
+        id: 'error-' + Date.now(),
+        sessionId: activeSession.id,
+        text: errorMsg,
+        role: 'model',
+        startTime: Date.now(),
+        endTime: Date.now() + 1000,
+        confidence: 1.0
+      } as TranscriptChunk;
+
+      if (isGuest) {
+        setTranscripts(prev => [...prev, errorTranscript]);
+      }
     } finally {
       setIsThinking(false);
       setUserInput('');
@@ -487,29 +505,125 @@ export default function App() {
   };
 
   // --- Speech Recognition Setup ---
+  const recognitionRef = useRef<any>(null);
+  const [interimText, setInterimText] = useState('');
+
   const startListening = () => {
+    if (recognitionRef.current) return; // already running
+
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert("Speech recognition not supported in this browser.");
+      alert("Speech recognition not supported in this browser. Please use Chrome.");
       return;
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onresult = (event: any) => {
-      const text = event.results[0][0].transcript;
-      handleUserSpeech(text);
+      let interim = '';
+      let final = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          final += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+
+      if (interim) {
+        setInterimText(interim);
+      }
+
+      if (final.trim()) {
+        setInterimText('');
+        // Add punctuation via a simple heuristic since Web Speech API doesn't punctuate
+        const punctuated = addBasicPunctuation(final.trim());
+        handleUserSpeech(punctuated);
+      }
     };
 
     recognition.onerror = (event: any) => {
       console.error('Speech recognition error', event.error);
+      if (event.error === 'not-allowed') {
+        alert('Microphone access denied. Please allow microphone access and try again.');
+      }
+      // Auto-restart on recoverable errors
+      if (event.error === 'network' || event.error === 'aborted') {
+        setTimeout(() => {
+          if (isRecording && recognitionRef.current) {
+            try { recognitionRef.current.start(); } catch {}
+          }
+        }, 1000);
+      }
     };
 
-    recognition.start();
+    recognition.onend = () => {
+      // Auto-restart if we're still supposed to be recording
+      if (isRecording) {
+        try { recognition.start(); } catch {}
+      }
+    };
+
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch (e) {
+      console.error('Failed to start speech recognition', e);
+    }
   };
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.onend = null; // prevent auto-restart
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
+    }
+    setInterimText('');
+  };
+
+  /**
+   * Add basic punctuation to speech-to-text output.
+   * This is a heuristic approach; real punctuation comes from the AI analysis.
+   */
+  function addBasicPunctuation(text: string): string {
+    // Capitalize first letter
+    let result = text.charAt(0).toUpperCase() + text.slice(1);
+
+    // Add period at end if no punctuation
+    if (!/[.!?]$/.test(result.trim())) {
+      // Check if it's a question
+      const questionWords = /^(what|where|when|why|who|how|is|are|was|were|do|does|did|can|could|would|should|will|have|has|had)\b/i;
+      if (questionWords.test(result.trim())) {
+        result = result.trim() + '?';
+      } else {
+        result = result.trim() + '.';
+      }
+    }
+
+    // Add commas before common conjunctions/fillers in longer sentences
+    result = result.replace(/\b(but|however|although|because|so|and then|you know|I mean|like I said)\b/gi, ', $1');
+    // Clean up double commas
+    result = result.replace(/,\s*,/g, ',');
+    // Clean up comma at start
+    result = result.replace(/^,\s*/, '');
+
+    return result;
+  }
+
+  // Auto-start/stop recording when session state changes
+  useEffect(() => {
+    if (isRecording && view === 'session') {
+      startListening();
+    } else {
+      stopListening();
+    }
+    return () => stopListening();
+  }, [isRecording, view]);
 
   // --- Remove Mock Transcription ---
 
@@ -873,33 +987,31 @@ export default function App() {
                   )}
                 </div>
 
+                {/* Real-time speech preview */}
+                {interimText && (
+                  <div className="px-4 py-2 bg-zinc-50 rounded-xl text-sm text-zinc-400 italic animate-pulse">
+                    {interimText}...
+                  </div>
+                )}
+
                 <div className="pt-6 border-t border-zinc-100 space-y-4">
                   <div className="flex gap-2">
-                    <input 
+                    <input
                       type="text"
                       value={userInput}
                       onChange={(e) => setUserInput(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleUserSpeech(userInput)}
-                      placeholder="Type your response..."
+                      placeholder="Speak or type your response..."
                       className="flex-1 bg-zinc-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-black transition-all"
                       disabled={isThinking}
                     />
-                    <Button 
-                      size="icon" 
+                    <Button
+                      size="icon"
                       className="rounded-xl h-12 w-12"
                       onClick={() => handleUserSpeech(userInput)}
                       disabled={isThinking || !userInput.trim()}
                     >
                       <Send size={18} />
-                    </Button>
-                    <Button 
-                      variant="outline"
-                      size="icon" 
-                      className="rounded-xl h-12 w-12"
-                      onClick={startListening}
-                      disabled={isThinking}
-                    >
-                      <Mic size={18} />
                     </Button>
                   </div>
                   

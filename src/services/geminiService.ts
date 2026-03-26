@@ -7,7 +7,7 @@ export async function analyzeTranscripts(transcripts: TranscriptChunk[]): Promis
   const fullText = transcripts.map(t => t.text).join(" ");
   
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-2.0-flash",
     contents: `Analyze the following transcript for communication style features. 
     Return a JSON object matching the AnalysisResult schema.
     
@@ -71,7 +71,7 @@ export async function analyzeTranscripts(transcripts: TranscriptChunk[]): Promis
 
 export async function generateVoiceProfile(analysis: AnalysisResult): Promise<VoiceProfileData> {
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-2.0-flash",
     contents: `Based on the following communication analysis, generate a structured Voice Profile JSON with multiple layers (baseline, emotional, casual, compressed).
     
     Analysis:
@@ -173,7 +173,7 @@ export async function generateConversationResponse(
   voiceScore: VoiceScore
 ): Promise<string> {
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-2.0-flash",
     contents: history.map(h => ({ role: h.role, parts: [{ text: h.text }] })),
     config: {
       systemInstruction: `You are the VoiceMirror Interviewer. Your goal is to capture the user's unique "Voice DNA".
@@ -202,7 +202,7 @@ export async function generateConversationResponse(
 
 export async function rewriteText(profile: VoiceProfileData, inputText: string): Promise<string> {
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-2.0-flash",
     contents: `Rewrite the following text in the specified voice.
     
     Voice Profile:
