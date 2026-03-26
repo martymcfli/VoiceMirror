@@ -18,12 +18,14 @@ import {
   Send
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
+import {
+  signInWithPopup,
+  signInWithRedirect,
+  signInAnonymously,
+  GoogleAuthProvider,
+  onAuthStateChanged,
   signOut,
-  User as FirebaseUser 
+  User as FirebaseUser
 } from 'firebase/auth';
 import { 
   collection, 
@@ -173,15 +175,14 @@ export default function App() {
       setUser(u);
       setLoading(false);
       if (u) {
-        // Sync user profile
-        const userRef = doc(db, 'users', u.uid);
-        setDoc(userRef, {
-          email: u.email,
-          createdAt: new Date().toISOString()
-        }, { merge: true }).catch(e => handleFirestoreError(e, OperationType.WRITE, 'users'));
-        
-        // Check if user has profiles to decide between dashboard and onboarding
-        // For simplicity in MVP, we'll go to dashboard if they are logged in
+        // Only sync to Firestore for real Firebase users, not local guests
+        if (!u.uid.startsWith('guest-')) {
+          const userRef = doc(db, 'users', u.uid);
+          setDoc(userRef, {
+            email: u.email,
+            createdAt: new Date().toISOString()
+          }, { merge: true }).catch(e => console.warn('User sync error:', e));
+        }
         setView('dashboard');
       } else {
         setView('landing');
@@ -190,18 +191,23 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Helper to check if this is a real Firebase user (not our local guest fallback)
+  const isRealFirebaseUser = (u: FirebaseUser | null): boolean => {
+    return !!u && !u.uid.startsWith('guest-');
+  };
+
   useEffect(() => {
-    if (!user) return;
+    if (!user || !isRealFirebaseUser(user)) return;
 
     const profilesQuery = query(collection(db, 'profiles'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
     const unsubscribeProfiles = onSnapshot(profilesQuery, (snapshot) => {
       setProfiles(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as VoiceProfile)));
-    }, (e) => handleFirestoreError(e, OperationType.LIST, 'profiles'));
+    }, (e) => console.warn('Profiles query error (expected for guests):', e));
 
     const sessionsQuery = query(collection(db, 'sessions'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'), limit(10));
     const unsubscribeSessions = onSnapshot(sessionsQuery, (snapshot) => {
       setSessions(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as VoiceSession)));
-    }, (e) => handleFirestoreError(e, OperationType.LIST, 'sessions'));
+    }, (e) => console.warn('Sessions query error (expected for guests):', e));
 
     return () => {
       unsubscribeProfiles();
@@ -222,12 +228,49 @@ export default function App() {
     const provider = new GoogleAuthProvider();
     try {
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error('Login failed', error);
+    } catch (error: any) {
+      // If popup blocked or unauthorized domain, try redirect
+      if (error?.code === 'auth/unauthorized-domain' || error?.code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, provider);
+        } catch (redirectError) {
+          console.error('Redirect login also failed', redirectError);
+        }
+      } else {
+        console.error('Login failed', error);
+      }
     }
   };
 
-  const handleLogout = () => signOut(auth);
+  const handleGuestLogin = async () => {
+    try {
+      await signInAnonymously(auth);
+    } catch (error) {
+      console.error('Anonymous auth failed, using local guest mode', error);
+      // Create a fake local user object so the app still works
+      const guestUser = {
+        uid: 'guest-' + Date.now(),
+        email: 'guest@voicemirror.demo',
+        displayName: 'Guest User',
+        isAnonymous: true,
+      } as unknown as FirebaseUser;
+      setUser(guestUser);
+      setView('dashboard');
+    }
+  };
+
+  const handleLogout = () => {
+    if (user?.uid?.startsWith('guest-')) {
+      setUser(null);
+      setView('landing');
+      setProfiles([]);
+      setSessions([]);
+      return;
+    }
+    signOut(auth);
+  };
+
+  const isGuest = user?.uid?.startsWith('guest-') || false;
 
   const startSession = async (mode: 'guided' | 'freeform') => {
     if (!user) return;
@@ -238,17 +281,25 @@ export default function App() {
         status: 'active',
         createdAt: new Date().toISOString()
       };
-      const docRef = await addDoc(collection(db, 'sessions'), sessionData);
-      setActiveSession({ id: docRef.id, ...sessionData } as VoiceSession);
+
+      let sessionId: string;
+      if (isGuest) {
+        sessionId = 'local-' + Date.now();
+      } else {
+        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
+        sessionId = docRef.id;
+      }
+
+      setActiveSession({ id: sessionId, ...sessionData } as VoiceSession);
       setTranscripts([]);
       setResponseHistory([]);
       setVoiceScore({ coverage: 0, variability: 0, consistency: 0, depth: 0, adaptability: 0, finalScore: 0 });
       promptEngine.current = new PromptEngine();
-      
+
       const firstPrompt = promptEngine.current.getNextPrompt([], { coverage: 0, variability: 0, consistency: 0, depth: 0, adaptability: 0, finalScore: 0 });
       setCurrentPrompt(firstPrompt.prompt);
       setCurrentCategory(firstPrompt.category);
-      
+
       setView('session');
       setIsRecording(true);
     } catch (error) {
@@ -260,34 +311,47 @@ export default function App() {
     if (!activeSession) return;
     setIsRecording(false);
     try {
-      const sessionRef = doc(db, 'sessions', activeSession.id);
-      await updateDoc(sessionRef, {
-        status: 'processing',
-        endedAt: new Date().toISOString()
-      });
-      
-      // Trigger analysis
+      if (!isGuest) {
+        const sessionRef = doc(db, 'sessions', activeSession.id);
+        await updateDoc(sessionRef, {
+          status: 'processing',
+          endedAt: new Date().toISOString()
+        });
+      }
+
+      // Trigger analysis (works for both guests and real users - Gemini API call)
       const analysis = await analyzeTranscripts(transcripts);
       const profileData = await generateVoiceProfile(analysis);
-      
-      // Create profile
-      const profileRef = await addDoc(collection(db, 'profiles'), {
-        userId: user?.uid,
-        name: `Voice Profile ${profiles.length + 1}`,
-        profileJson: profileData,
-        createdAt: new Date().toISOString()
-      });
-      
-      await updateDoc(sessionRef, { status: 'completed' });
-      
+
+      let profileId: string;
+      if (isGuest) {
+        profileId = 'local-profile-' + Date.now();
+      } else {
+        const profileRef = await addDoc(collection(db, 'profiles'), {
+          userId: user?.uid,
+          name: `Voice Profile ${profiles.length + 1}`,
+          profileJson: profileData,
+          createdAt: new Date().toISOString()
+        });
+        profileId = profileRef.id;
+
+        const sessionRef = doc(db, 'sessions', activeSession.id);
+        await updateDoc(sessionRef, { status: 'completed' });
+      }
+
       const newProfile = {
-        id: profileRef.id,
+        id: profileId,
         userId: user?.uid || '',
         name: `Voice Profile ${profiles.length + 1}`,
         profileJson: profileData,
         createdAt: new Date().toISOString()
       };
-      
+
+      // For guests, also add to local profiles state
+      if (isGuest) {
+        setProfiles(prev => [newProfile, ...prev]);
+      }
+
       setSelectedProfile(newProfile);
       setView('profile');
       setActiveSession(null);
@@ -311,7 +375,11 @@ export default function App() {
 
   const deleteProfile = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'profiles', id));
+      if (isGuest) {
+        setProfiles(prev => prev.filter(p => p.id !== id));
+      } else {
+        await deleteDoc(doc(db, 'profiles', id));
+      }
       if (selectedProfile?.id === id) {
         setSelectedProfile(null);
         setView('dashboard');
@@ -324,20 +392,34 @@ export default function App() {
   const handleUserSpeech = async (text: string) => {
     if (!activeSession || !text.trim()) return;
 
-    // 1. Add user transcript
     try {
-      await addDoc(collection(db, `sessions/${activeSession.id}/transcripts`), {
+      const userTranscript: TranscriptChunk = {
+        id: 'local-' + Date.now(),
         sessionId: activeSession.id,
         text,
         role: 'user',
         startTime: Date.now(),
         endTime: Date.now() + 1000,
         confidence: 1.0
-      });
+      } as TranscriptChunk;
+
+      // 1. Save user transcript
+      if (isGuest) {
+        setTranscripts(prev => [...prev, userTranscript]);
+      } else {
+        await addDoc(collection(db, `sessions/${activeSession.id}/transcripts`), {
+          sessionId: activeSession.id,
+          text,
+          role: 'user',
+          startTime: Date.now(),
+          endTime: Date.now() + 1000,
+          confidence: 1.0
+        });
+      }
 
       // 2. Analyze response and update score
       const responseState = VoiceIntelligenceService.analyzeResponse(text, currentCategory, currentCategory === "TRANSFORMATION");
-      
+
       let updatedHistory: ResponseState[] = [];
       setResponseHistory(prev => {
         updatedHistory = [...prev, responseState];
@@ -348,26 +430,46 @@ export default function App() {
 
       // 3. Get AI response using Gemini
       setIsThinking(true);
-      
-      // Get conversation history for Gemini
-      const historyQuery = query(collection(db, `sessions/${activeSession.id}/transcripts`), orderBy('startTime', 'asc'));
-      const historySnapshot = await getDocs(historyQuery);
-      const history = historySnapshot.docs.map(d => ({
-        role: d.data().role === 'user' ? 'user' : 'model' as 'user' | 'model',
-        text: d.data().text
-      }));
+
+      // Build conversation history from local state or Firestore
+      let history: { role: 'user' | 'model'; text: string }[];
+      if (isGuest) {
+        history = [...transcripts, userTranscript].map(t => ({
+          role: (t as any).role === 'user' ? 'user' : 'model' as 'user' | 'model',
+          text: t.text
+        }));
+      } else {
+        const historyQuery = query(collection(db, `sessions/${activeSession.id}/transcripts`), orderBy('startTime', 'asc'));
+        const historySnapshot = await getDocs(historyQuery);
+        history = historySnapshot.docs.map(d => ({
+          role: d.data().role === 'user' ? 'user' : 'model' as 'user' | 'model',
+          text: d.data().text
+        }));
+      }
 
       const aiResponse = await generateConversationResponse(history, currentPrompt, voiceScore);
-      
-      // 4. Add AI transcript
-      await addDoc(collection(db, `sessions/${activeSession.id}/transcripts`), {
-        sessionId: activeSession.id,
-        text: aiResponse,
-        role: 'model',
-        startTime: Date.now(),
-        endTime: Date.now() + 1000,
-        confidence: 1.0
-      });
+
+      // 4. Save AI transcript
+      if (isGuest) {
+        setTranscripts(prev => [...prev, {
+          id: 'local-ai-' + Date.now(),
+          sessionId: activeSession.id,
+          text: aiResponse,
+          role: 'model',
+          startTime: Date.now(),
+          endTime: Date.now() + 1000,
+          confidence: 1.0
+        } as TranscriptChunk]);
+      } else {
+        await addDoc(collection(db, `sessions/${activeSession.id}/transcripts`), {
+          sessionId: activeSession.id,
+          text: aiResponse,
+          role: 'model',
+          startTime: Date.now(),
+          endTime: Date.now() + 1000,
+          confidence: 1.0
+        });
+      }
 
       // 5. Update prompt if needed
       if (updatedHistory.length % 3 === 0) {
@@ -517,6 +619,13 @@ export default function App() {
             
             <Button onClick={handleLogin} className="w-full" size="lg">
               Continue with Google
+            </Button>
+            <div className="relative flex items-center justify-center">
+              <div className="border-t border-zinc-200 w-full"></div>
+              <span className="bg-white px-3 text-xs text-zinc-400 absolute">or</span>
+            </div>
+            <Button onClick={handleGuestLogin} variant="outline" className="w-full" size="lg">
+              Try as Guest
             </Button>
           </Card>
         </motion.div>
